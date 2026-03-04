@@ -20,9 +20,9 @@ meshTools.pcu.signed_distance_to_mesh = new_sdf_fn
 
 CACHE = True
 USE_WANDB = False
-PROJECT_NAME = 'Vertebrae' # TO DO: change name
-ENTITY_NAME = 'UF'
-RUN_NAME = 'run_v32' # TO DO: update run name
+PROJECT_NAME = 'Classification' # TO DO: change name
+ENTITY_NAME = 'GATECH'
+RUN_NAME = 'del_v1' # TO DO: update run name
 LOC_SDF_CACHE = 'cache'
 LOC_SAVE_NEW_MODELS = RUN_NAME
 

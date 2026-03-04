@@ -1,0 +1,14 @@
+README.md
+setup.py
+NSM/__init__.py
+NSM/helper_funcs.py
+NSM/losses.py
+NSM/optimization.py
+NSM/plotting.py
+NSM/shape_completion.py
+NSM/traverse_latents.py
+NSM/utils.py
+nsm.egg-info/PKG-INFO
+nsm.egg-info/SOURCES.txt
+nsm.egg-info/dependency_links.txt
+nsm.egg-info/top_level.txt

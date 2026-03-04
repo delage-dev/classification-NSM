@@ -299,7 +299,7 @@ class TriplanarDecoder(nn.Module):
             grid_sample(
                 input=plane_feature.unsqueeze(0),
                 grid=grid,
-                padding_mode="border",
+                padding_mode="zeros",
                 align_corners=True,
                 mode="bilinear",
             )
