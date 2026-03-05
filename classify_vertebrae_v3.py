@@ -152,6 +152,7 @@ _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.95)
 X_train_all = latent_codes.cpu().numpy()
 
 y_train_species = []
+y_train_genera = []
 y_train_positions = []
 valid_indices = []
 
@@ -159,13 +160,14 @@ for f_idx, f in enumerate(all_vtk_files):
     parsed = parse_taxonomy_from_filename(f)
     if parsed and parsed.get('species') and parsed.get('position'):
         y_train_species.append(parsed['species'])
+        y_train_genera.append(parsed['genus'])
         y_train_positions.append(parsed['position'])
         valid_indices.append(f_idx)
     else:
         print(f"Skipping training file with invalid label format: {f}")
 
 X_train = X_train_all[valid_indices]
-y_train = np.column_stack((y_train_species, y_train_positions))
+y_train = np.column_stack((y_train_species, y_train_genera, y_train_positions))
 
 # ======================================================================
 # Metric Learning
@@ -253,7 +255,8 @@ for mesh_idx, vert_fname in enumerate(mesh_list):
 
     knn_preds = predictions['KNN'][0]
     print(f"Predicted Species (KNN): {knn_preds[0]}")
-    print(f"Predicted Position (KNN): {knn_preds[1]}")
+    print(f"Predicted Genus (KNN): {knn_preds[1]}")
+    print(f"Predicted Position (KNN): {knn_preds[2]}")
 
     # --- Distance-based classification ---
     similar_ids_cos, distances_cos = find_similar_cos(latent_novel, latent_codes, top_k=5, n_std=2, device=device)
@@ -272,7 +275,8 @@ for mesh_idx, vert_fname in enumerate(mesh_list):
             preds = predictions[clf_name][0]
             f.write(f"[{clf_name}]\n")
             f.write(f"  Predicted Species: {preds[0]}\n")
-            f.write(f"  Predicted Position: {preds[1]}\n")
+            f.write(f"  Predicted Genus: {preds[1]}\n")
+            f.write(f"  Predicted Position: {preds[2]}\n")
             f.write(f"  Inference Time: {inference_times[clf_name]:.4f}s\n")
             if probabilities[clf_name] is not None:
                 probs = probabilities[clf_name]
@@ -284,8 +288,14 @@ for mesh_idx, vert_fname in enumerate(mesh_list):
                     for cls, prob in zip(sp_classes, sp_probs):
                         if prob > 0.01:
                             f.write(f"    {cls}: {prob:.2%}\n")
-                    pos_classes = estimators[1].classes_
-                    pos_probs = probs[1][0]
+                    gen_classes = estimators[1].classes_
+                    gen_probs = probs[1][0]
+                    f.write("  Genus Probabilities (>1%):\n")
+                    for cls, prob in zip(gen_classes, gen_probs):
+                        if prob > 0.01:
+                            f.write(f"    {cls}: {prob:.2%}\n")
+                    pos_classes = estimators[2].classes_
+                    pos_probs = probs[2][0]
                     f.write("  Position Probabilities (>1%):\n")
                     for cls, prob in zip(pos_classes, pos_probs):
                         if prob > 0.01:
@@ -387,6 +397,7 @@ for mesh_idx, vert_fname in enumerate(mesh_list):
     # --- Build summary log entry ---
     parsed_truth = parse_taxonomy_from_filename(mesh_basename)
     mesh_species = parsed_truth.get('species') if parsed_truth else extract_species_prefix(mesh_basename)
+    mesh_genus = parsed_truth.get('genus') if parsed_truth else None
     mesh_position = parsed_truth.get('position') if parsed_truth else None
 
     cos_top1_species = extract_species_prefix(all_vtk_files[similar_ids_cos[0]]) if similar_ids_cos else None
@@ -400,29 +411,37 @@ for mesh_idx, vert_fname in enumerate(mesh_list):
     top_k_summary = {
         "mesh": mesh_basename,
         "ground_truth_species": mesh_species,
+        "ground_truth_genus": mesh_genus,
         "ground_truth_position": mesh_position,
         "output_mesh": output_mesh_path,
     }
 
     for clf_name in trained_models.keys():
         pred_sp = predictions[clf_name][0][0]
-        pred_pos = predictions[clf_name][0][1]
+        pred_gen = predictions[clf_name][0][1]
+        pred_pos = predictions[clf_name][0][2]
 
         match_sp = "yes" if mesh_species and mesh_species == pred_sp else "no"
+        match_gen = "yes" if mesh_genus and mesh_genus == pred_gen else "no"
         match_pos = "yes" if mesh_position and str(mesh_position) == str(pred_pos) else "no"
 
         if probabilities[clf_name] is not None:
             sp_conf = max(probabilities[clf_name][0][0])
-            pos_conf = max(probabilities[clf_name][1][0])
+            gen_conf = max(probabilities[clf_name][1][0])
+            pos_conf = max(probabilities[clf_name][2][0])
             top_k_summary[f"{clf_name}_species_confidence"] = f"{sp_conf:.2%}"
+            top_k_summary[f"{clf_name}_genus_confidence"] = f"{gen_conf:.2%}"
             top_k_summary[f"{clf_name}_position_confidence"] = f"{pos_conf:.2%}"
         else:
             top_k_summary[f"{clf_name}_species_confidence"] = "N/A"
+            top_k_summary[f"{clf_name}_genus_confidence"] = "N/A"
             top_k_summary[f"{clf_name}_position_confidence"] = "N/A"
 
         top_k_summary[f"{clf_name}_predicted_species"] = pred_sp
+        top_k_summary[f"{clf_name}_predicted_genus"] = pred_gen
         top_k_summary[f"{clf_name}_predicted_position"] = pred_pos
         top_k_summary[f"{clf_name}_match_species"] = match_sp
+        top_k_summary[f"{clf_name}_match_genus"] = match_gen
         top_k_summary[f"{clf_name}_match_position"] = match_pos
         top_k_summary[f"{clf_name}_inf_time"] = inference_times[clf_name]
 
@@ -483,6 +502,7 @@ all_metrics_rows = []
 
 for clf_name in CLASSIFIER_NAMES:
     sp_col = f"{clf_name}_predicted_species"
+    gen_col = f"{clf_name}_predicted_genus"
     pos_col = f"{clf_name}_predicted_position"
 
     # --- Species metrics ---
@@ -493,6 +513,17 @@ for clf_name in CLASSIFIER_NAMES:
         sp_df = metrics_to_dataframe(sp_metrics, classifier_name=clf_name)
         sp_df["target"] = "species"
         all_metrics_rows.append(sp_df)
+
+    # --- Genus metrics ---
+    if gen_col in df.columns and "ground_truth_genus" in df.columns:
+        mask = df["ground_truth_genus"].notna() & df[gen_col].notna()
+        y_true_gen = df.loc[mask, "ground_truth_genus"].tolist()
+        y_pred_gen = df.loc[mask, gen_col].tolist()
+        if y_true_gen:
+            gen_metrics = calculate_metrics(y_true_gen, y_pred_gen)
+            gen_df = metrics_to_dataframe(gen_metrics, classifier_name=clf_name)
+            gen_df["target"] = "genus"
+            all_metrics_rows.append(gen_df)
 
     # --- Position metrics ---
     if pos_col in df.columns and "ground_truth_position" in df.columns:
@@ -564,6 +595,18 @@ with open(summary_md_path, "w") as f:
                     "precision_weighted", "recall_weighted", "f1_weighted", "n_samples"]
             existing = [c for c in cols if c in sp_summary.columns]
             f.write(sp_summary[existing].to_markdown(index=False))
+            f.write("\n\n")
+
+        gen_summary = metrics_df[
+            (metrics_df["target"] == "genus") & (metrics_df["level"] == "summary")
+        ]
+        if not gen_summary.empty:
+            f.write("## Genus Prediction\n\n")
+            cols = ["classifier", "instance_accuracy", "average_class_accuracy",
+                    "precision_macro", "recall_macro", "f1_macro",
+                    "precision_weighted", "recall_weighted", "f1_weighted", "n_samples"]
+            existing = [c for c in cols if c in gen_summary.columns]
+            f.write(gen_summary[existing].to_markdown(index=False))
             f.write("\n\n")
 
         pos_summary = metrics_df[
