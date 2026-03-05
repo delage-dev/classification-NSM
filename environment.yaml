@@ -325,4 +325,4 @@ dependencies:
       - werkzeug==3.1.5
       - widgetsnbextension==4.0.15
       - zipp==3.23.0
-prefix: /home/jyu682.gatech/.conda/envs/NSM
+prefix: /home/mdelage6.gatech/.conda/envs/NSM
