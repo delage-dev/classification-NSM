@@ -90,6 +90,20 @@ path_config = 'vertebrae_config.json'
 with open(path_config, 'r') as f:
     config = json.load(f)
 
+# ======================================================================
+# Device detection — CUDA > MPS > CPU
+# ======================================================================
+if torch.cuda.is_available():
+    config['device'] = 'cuda:0'
+    print("Using CUDA GPU")
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    config['device'] = 'mps'
+    os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+    print("Using Apple MPS (M1/M2/M3 GPU)")
+else:
+    config['device'] = 'cpu'
+    print("Using CPU")
+
 if USE_WANDB is True:
     config['project_name'] = PROJECT_NAME
     config['entity_name'] = ENTITY_NAME
@@ -271,6 +285,7 @@ def train_deep_sdf_hierarchy(
         if not os.path.exists(os.path.split(cwd)[0] + "/train_logs/"):
             os.makedirs(os.path.split(cwd)[0] + "/train_logs/")
 
+    use_pin_memory = ("cuda" in str(config["device"]))
     data_loader = torch.utils.data.DataLoader(
         sdf_dataset,
         batch_size=config["objects_per_batch"],
@@ -278,7 +293,7 @@ def train_deep_sdf_hierarchy(
         num_workers=config["num_data_loader_threads"],
         drop_last=False,
         prefetch_factor=config["prefetch_factor"],
-        pin_memory=True,
+        pin_memory=use_pin_memory,
     )
 
     latent_vecs = get_latent_vecs(len(data_loader.dataset), config).to(config["device"])
@@ -303,29 +318,27 @@ def train_deep_sdf_hierarchy(
 
     if config["resume_epoch"] > 1:
         print("Loading model, optimizer, and latent states from epoch", config["resume_epoch"])
-        model.load_state_dict(
-            torch.load(os.path.join(
-                config["experiment_directory"], "model", f'{config["resume_epoch"]}.pth'
-            ))["model"]
+        map_loc = config["device"]
+        model_ckpt = torch.load(
+            os.path.join(config["experiment_directory"], "model", f'{config["resume_epoch"]}.pth'),
+            map_location=map_loc,
         )
-        optimizer.load_state_dict(
-            torch.load(os.path.join(
-                config["experiment_directory"], "model", f'{config["resume_epoch"]}.pth'
-            ))["optimizer"]
+        model.load_state_dict(model_ckpt["model"])
+        optimizer.load_state_dict(model_ckpt["optimizer"])
+
+        latent_ckpt = torch.load(
+            os.path.join(config["experiment_directory"], "latent_codes", f'{config["resume_epoch"]}.pth'),
+            map_location=map_loc,
         )
-        latent_vecs.load_state_dict(
-            torch.load(os.path.join(
-                config["experiment_directory"], "latent_codes", f'{config["resume_epoch"]}.pth'
-            ))["latent_codes"]
-        )
+        latent_vecs.load_state_dict(latent_ckpt["latent_codes"])
+
         # Resume classification heads if available
         heads_path = os.path.join(
             config["experiment_directory"], "classification_heads", f'{config["resume_epoch"]}.pth'
         )
         if classification_heads is not None and os.path.exists(heads_path):
-            classification_heads.load_state_dict(
-                torch.load(heads_path)["classification_heads"]
-            )
+            heads_ckpt = torch.load(heads_path, map_location=map_loc)
+            classification_heads.load_state_dict(heads_ckpt["classification_heads"])
             print("Loaded classification heads from checkpoint")
 
     with get_profiler(config) as profiler:
@@ -423,7 +436,7 @@ def train_epoch_hierarchy(
         if config["verbose"] is True:
             print("sdf index size:", indices.size())
 
-        xyz = sdf_data["xyz"].to(config["device"])
+        xyz = sdf_data["xyz"].float().to(config["device"])
         xyz = xyz.reshape(-1, 3)
         num_sdf_samples = xyz.shape[0]
         xyz.requires_grad = False
@@ -436,14 +449,14 @@ def train_epoch_hierarchy(
         # Build SDF ground truth
         sdf_gt = []
         if n_surfaces == 1:
-            sdf_gt_ = sdf_data["gt_sdf"].reshape(-1, 1)
+            sdf_gt_ = sdf_data["gt_sdf"].float().reshape(-1, 1)
             if config["enforce_minmax"] is True:
                 sdf_gt_ = torch.clamp(sdf_gt_, -config["clamp_dist"], config["clamp_dist"])
             sdf_gt_.requires_grad = False
             sdf_gt.append(sdf_gt_)
         else:
             for surf_idx in range(n_surfaces):
-                sdf_gt_ = sdf_data["gt_sdf"][:, :, surf_idx].reshape(-1, 1)
+                sdf_gt_ = sdf_data["gt_sdf"][:, :, surf_idx].float().reshape(-1, 1)
                 if config["enforce_minmax"] is True:
                     sdf_gt_ = torch.clamp(sdf_gt_, -config["clamp_dist"], config["clamp_dist"])
                 sdf_gt_.requires_grad = False

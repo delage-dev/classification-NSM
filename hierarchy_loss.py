@@ -8,6 +8,7 @@
 #   - compute_classification_head_loss: cross-entropy loss across taxonomy levels
 
 import os
+os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -66,11 +67,12 @@ class TaxonomyLabelEncoder:
             self.labels[level] = np.array(labels, dtype=np.int64)
 
     def get_batch_labels(
-        self, indices: torch.Tensor, level: str, device: str = 'cpu'
+        self, indices: torch.Tensor, level: str, device='cpu'
     ) -> torch.Tensor:
         """
         Given batch object indices, return taxonomy labels for that level.
         Returns tensor of shape (batch_size,) with -1 for missing labels.
+        Device can be a string ('cpu', 'cuda:0', 'mps') or a torch.device.
         """
         idx_np = indices.cpu().numpy()
         labels = self.labels[level][idx_np]
@@ -133,33 +135,36 @@ class HierarchyContrastiveLoss(nn.Module):
     ) -> torch.Tensor:
         batch_size = latent_codes.shape[0]
         if batch_size < 2:
-            return torch.tensor(0.0, device=device, requires_grad=True)
+            return (latent_codes.sum() * 0.0)  # zero with grad, on correct device
 
         # Normalize for stable distances
-        z_norm = F.normalize(latent_codes, p=2, dim=1)
+        z_norm = F.normalize(latent_codes.float(), p=2, dim=1)
 
-        # Pairwise Euclidean distances
-        dists = torch.cdist(z_norm, z_norm, p=2)  # (B, B)
+        # Pairwise Euclidean distances — manual computation avoids torch.cdist
+        # whose backward is not implemented on MPS
+        diff = z_norm.unsqueeze(0) - z_norm.unsqueeze(1)  # (B, B, D)
+        dists = torch.sqrt((diff ** 2).sum(dim=-1) + 1e-12)  # (B, B)
 
-        # Build pairwise taxonomic distance matrix
+        # Build pairwise taxonomic distance matrix on CPU then move
         idx_np = object_indices.cpu().numpy()
-        tax_dists = torch.zeros(batch_size, batch_size, device=device)
+        tax_dists_np = np.zeros((batch_size, batch_size), dtype=np.int64)
         for i in range(batch_size):
             for j in range(i + 1, batch_size):
                 td = taxonomy_encoder.taxonomic_distance(
                     taxonomy_encoder.parsed[idx_np[i]],
                     taxonomy_encoder.parsed[idx_np[j]],
                 )
-                tax_dists[i, j] = td
-                tax_dists[j, i] = td
+                tax_dists_np[i, j] = td
+                tax_dists_np[j, i] = td
+        tax_dists = torch.tensor(tax_dists_np, dtype=torch.long, device=latent_codes.device)
 
         # Upper triangle mask to avoid double counting
         upper = torch.triu(
-            torch.ones(batch_size, batch_size, dtype=torch.bool, device=device),
+            torch.ones(batch_size, batch_size, dtype=torch.bool, device=latent_codes.device),
             diagonal=1,
         )
 
-        loss = torch.tensor(0.0, device=device, requires_grad=True)
+        loss = latent_codes.sum() * 0.0  # zero with grad, on correct device
         n_pairs = 0
 
         for tax_dist in [0, 1, 2, 3]:
@@ -255,21 +260,28 @@ def compute_classification_head_loss(
             'species': 1.0, 'genus': 0.5, 'family': 0.25, 'position': 0.75,
         }
 
-    total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    # Derive device from logits tensors to avoid str vs torch.device issues
+    any_logit = next(iter(logits.values()))
+    actual_device = any_logit.device
+
+    # Start with a zero that carries grad from the logits (never a detached leaf)
+    total_loss = any_logit.sum() * 0.0
     loss_dict = {}
 
     for level, weight in level_weights.items():
-        if level not in logits:
+        if level not in logits or weight == 0.0:
             continue
 
-        labels = taxonomy_encoder.get_batch_labels(object_indices, level, device=device)
+        labels = taxonomy_encoder.get_batch_labels(
+            object_indices, level, device=actual_device,
+        )
 
         # Mask out missing labels
         valid_mask = labels >= 0
         if valid_mask.sum() == 0:
             continue
 
-        valid_logits = logits[level][valid_mask]
+        valid_logits = logits[level][valid_mask].float()
         valid_labels = labels[valid_mask]
 
         ce_loss = F.cross_entropy(valid_logits, valid_labels)
