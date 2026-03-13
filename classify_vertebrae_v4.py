@@ -118,7 +118,7 @@ ABLATION_CONFIGS = OrderedDict([
 # ======================================================================
 # Configuration
 # ======================================================================
-TRAIN_DIR = "run_v56"
+TRAIN_DIR = "run_v57"
 os.chdir(TRAIN_DIR)
 CKPT = '2000'
 LC_PATH = f'latent_codes/{CKPT}.pth'
