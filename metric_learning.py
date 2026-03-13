@@ -23,7 +23,23 @@ def _make_compat_wrapper(orig_fn):
 _skval.check_X_y = _make_compat_wrapper(_skval.check_X_y)
 _skval.check_array = _make_compat_wrapper(_skval.check_array)
 
+# metric-learn's _util.py does `from sklearn.utils import check_array` at import
+# time, capturing a direct reference to the original function. We must also patch
+# that captured reference after importing metric_learn.
 from metric_learn import LMNN, NCA
+
+# metric-learn submodules do `from sklearn.utils import check_array` at import
+# time, capturing direct references to the original functions. Patch every
+# module that holds such a reference so the compat shim is applied everywhere.
+import metric_learn._util as _ml_util
+import metric_learn.itml as _ml_itml
+import metric_learn.scml as _ml_scml
+
+for _mod in (_ml_util, _ml_itml, _ml_scml):
+    if hasattr(_mod, 'check_array'):
+        _mod.check_array = _make_compat_wrapper(_mod.check_array)
+    if hasattr(_mod, 'check_X_y'):
+        _mod.check_X_y = _make_compat_wrapper(_mod.check_X_y)
 
 class LatentMetricLearner:
     """
