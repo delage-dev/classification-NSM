@@ -1,22 +1,27 @@
 import numpy as np
 from typing import Optional, List, Union
 
-# metric-learn 0.7.0 passes `force_all_finite` to sklearn's check_X_y,
-# but scikit-learn >=1.6 renamed it to `ensure_all_finite`. Patch so the
-# call succeeds regardless of which sklearn version is installed.
+# metric-learn 0.7.0 passes `force_all_finite` to sklearn's check_X_y and
+# check_array, but scikit-learn >=1.6 renamed that parameter to
+# `ensure_all_finite`. Patch both functions so the call succeeds regardless
+# of which sklearn version is installed.
 import inspect as _inspect
 import sklearn.utils.validation as _skval
-_orig_check_X_y = _skval.check_X_y
-_check_sig = _inspect.signature(_orig_check_X_y)
-_accepts_force = 'force_all_finite' in _check_sig.parameters
-_accepts_ensure = 'ensure_all_finite' in _check_sig.parameters
-def _patched_check_X_y(*args, **kwargs):
-    if 'force_all_finite' in kwargs and not _accepts_force:
-        kwargs['ensure_all_finite'] = kwargs.pop('force_all_finite')
-    elif 'ensure_all_finite' in kwargs and not _accepts_ensure:
-        kwargs['force_all_finite'] = kwargs.pop('ensure_all_finite')
-    return _orig_check_X_y(*args, **kwargs)
-_skval.check_X_y = _patched_check_X_y
+
+def _make_compat_wrapper(orig_fn):
+    sig = _inspect.signature(orig_fn)
+    has_force = 'force_all_finite' in sig.parameters
+    has_ensure = 'ensure_all_finite' in sig.parameters
+    def wrapper(*args, **kwargs):
+        if 'force_all_finite' in kwargs and not has_force:
+            kwargs['ensure_all_finite'] = kwargs.pop('force_all_finite')
+        elif 'ensure_all_finite' in kwargs and not has_ensure:
+            kwargs['force_all_finite'] = kwargs.pop('ensure_all_finite')
+        return orig_fn(*args, **kwargs)
+    return wrapper
+
+_skval.check_X_y = _make_compat_wrapper(_skval.check_X_y)
+_skval.check_array = _make_compat_wrapper(_skval.check_array)
 
 from metric_learn import LMNN, NCA
 
