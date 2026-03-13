@@ -280,10 +280,8 @@ def train_deep_sdf_hierarchy(
         )
         wandb.watch(model, log="all")
     else:
-        cwd = config['experiment_directory']
-        log_fpath = os.path.split(cwd)[0] + "/train_logs/" + os.path.split(cwd)[1] + "_train_log.csv"
-        if not os.path.exists(os.path.split(cwd)[0] + "/train_logs/"):
-            os.makedirs(os.path.split(cwd)[0] + "/train_logs/")
+        log_fpath = os.path.join(config['experiment_directory'], 'train_log.csv')
+        os.makedirs(config['experiment_directory'], exist_ok=True)
 
     use_pin_memory = ("cuda" in str(config["device"]))
     data_loader = torch.utils.data.DataLoader(
@@ -315,6 +313,38 @@ def train_deep_sdf_hierarchy(
         })
         # Extend lr_schedules so adjust_learning_rate handles the 3rd group
         config["lr_schedules"].append(config["lr_schedules"][0])
+
+    # Save full config and data splits to experiment directory for reproducibility
+    os.makedirs(config['experiment_directory'], exist_ok=True)
+
+    config_save = {k: v for k, v in config.items()
+                   if not isinstance(v, (torch.nn.Module, torch.optim.Optimizer))}
+    config_save_path = os.path.join(config['experiment_directory'], 'config.json')
+    try:
+        with open(config_save_path, 'w') as f:
+            json.dump(config_save, f, indent=2, default=str)
+    except TypeError:
+        # Fall back: skip non-serializable values
+        serializable = {}
+        for k, v in config_save.items():
+            try:
+                json.dumps(v, default=str)
+                serializable[k] = v
+            except (TypeError, ValueError):
+                serializable[k] = str(v)
+        with open(config_save_path, 'w') as f:
+            json.dump(serializable, f, indent=2, default=str)
+
+    splits_path = os.path.join(config['experiment_directory'], 'data_splits.json')
+    with open(splits_path, 'w') as f:
+        json.dump({
+            'train_paths': config.get('list_mesh_paths', []),
+            'val_paths': config.get('val_paths', []),
+            'test_paths': config.get('test_paths', []),
+            'n_train': len(config.get('list_mesh_paths', [])),
+            'n_val': len(config.get('val_paths', [])),
+            'n_test': len(config.get('test_paths', [])),
+        }, f, indent=2)
 
     if config["resume_epoch"] > 1:
         print("Loading model, optimizer, and latent states from epoch", config["resume_epoch"])
