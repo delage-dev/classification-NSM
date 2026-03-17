@@ -36,7 +36,10 @@ def get_top_k_pcs(latent_codes, threshold=0.90):
     return pca, k + 1
 
 # Find the top 5 most similar meshes from training data to novel/input mesh - uses L2 (euclidian) distance in latent space
-def find_similar(latent_novel, latent_codes, top_k=5, n_std=2):
+def find_similar(latent_novel, latent_codes, top_k=5, n_std=2, device='cpu'):
+    # Ensure both tensors are on the same device
+    latent_novel = latent_novel.to(device)
+    latent_codes = latent_codes.to(device)
     dists = torch.norm(latent_codes - latent_novel, dim=1)
     mean_dist = dists.mean()
     std_dist = dists.std()

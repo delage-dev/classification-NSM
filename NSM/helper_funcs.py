@@ -140,13 +140,26 @@ def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1, devic
 
 def decode_sdf(decoder, latent_vector, queries, device='cuda'):
     num_samples = queries.shape[0]
-    if latent_vector is None:
-        inputs = queries
+    queries = queries.to(device)
+    
+    # Check if decoder is TriplanarDecoder (has fast inference path)
+    if hasattr(decoder, 'vae_decoder'):
+        # Use fast inference path: pass latent and xyz separately
+        # This bypasses UniqueConsecutive which has gradient issues
+        if latent_vector is not None:
+            latent = latent_vector.squeeze().to(device)
+        else:
+            latent = None
+        return decoder(latent=latent, xyz=queries)
     else:
-        latent_repeat = latent_vector.expand(num_samples, -1).to(device)
-        inputs = torch.cat([latent_repeat, queries], dim=1)
-    inputs = inputs.to(next(decoder.parameters()).device)  
-    return decoder(inputs)
+        # Legacy path for other decoder types
+        if latent_vector is None:
+            inputs = queries
+        else:
+            latent_repeat = latent_vector.expand(num_samples, -1).to(device)
+            inputs = torch.cat([latent_repeat, queries], dim=1)
+        inputs = inputs.to(next(decoder.parameters()).device)  
+        return decoder(inputs)
 # end monkey patch
 
 def parse_labels_from_filepaths(filepaths, regex_pattern=r"^(?P<species>[\w\s\-]+)[\-_ ]+[\w\d]+[\-_ ]+(?P<vertebra>[CTL]?\d+)", show_debug=False):

@@ -384,7 +384,7 @@ def read_mesh_get_sampled_pts(
             clip_val = 1.0 + uniform_pts_buffer / 2
             rand_pts = np.clip(rand_pts, -clip_val, clip_val)
 
-        rand_sdf = new_mesh.get_sdf_pts(pts=rand_pts, method="pcu")
+            rand_sdf = new_mesh.get_sdf_pts(pts=rand_pts.astype(new_mesh.point_coords.dtype), method="pcu")
 
         results["xyz"] = rand_pts
         results["sdf"] = rand_sdf
