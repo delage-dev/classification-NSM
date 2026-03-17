@@ -118,7 +118,7 @@ ABLATION_CONFIGS = OrderedDict([
 # ======================================================================
 # Configuration
 # ======================================================================
-TRAIN_DIR = "run_v57"
+TRAIN_DIR = "run_v56"
 os.chdir(TRAIN_DIR)
 CKPT = '2000'
 LC_PATH = f'latent_codes/{CKPT}.pth'
@@ -903,7 +903,7 @@ if combined_chart_data:
 # Summary statistics markdown
 # ======================================================================
 summary_md_path = os.path.join(run_dir, "summary_statistics.md")
-with open(summary_md_path, "w") as f:
+with open(summary_md_path, "w", encoding="utf-8") as f:
     f.write("# Ablation Study: Summary Statistics\n\n")
     f.write(f"**Generated:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  \n")
     f.write(f"**Checkpoint:** {CKPT}  \n")
@@ -1134,7 +1134,7 @@ all_training_times = {
     "classifiers_raw": classifiers_raw_times,
     "classifiers_ml": classifiers_ml_times,
 }
-with open(os.path.join(run_dir, "training_times.json"), "w") as f:
+with open(os.path.join(run_dir, "training_times.json"), "w", encoding="utf-8") as f:
     json.dump(all_training_times, f, indent=2)
 
 

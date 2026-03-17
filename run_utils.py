@@ -173,7 +173,7 @@ def write_run_manifest(
         lines.append("")
 
     readme_path = os.path.join(run_dir, "README.md")
-    with open(readme_path, "w") as f:
+    with open(readme_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
     return readme_path
@@ -187,10 +187,10 @@ def update_manifest_files_table(run_dir: str, extra_files: Dict[str, str]) -> No
     readme_path = os.path.join(run_dir, "README.md")
     if not os.path.exists(readme_path):
         # Create a minimal manifest
-        with open(readme_path, "w") as f:
+        with open(readme_path, "w", encoding="utf-8") as f:
             f.write("# Run Manifest\n\n")
 
-    with open(readme_path, "r") as f:
+    with open(readme_path, "r", encoding="utf-8") as f:
         content = f.read()
 
     # Build the new table
@@ -214,5 +214,5 @@ def update_manifest_files_table(run_dir: str, extra_files: Dict[str, str]) -> No
     else:
         content += "\n" + new_section
 
-    with open(readme_path, "w") as f:
+    with open(readme_path, "w", encoding="utf-8") as f:
         f.write(content)
