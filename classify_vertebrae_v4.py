@@ -37,6 +37,8 @@
 import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 import sys
+import argparse
+import glob as glob_module
 import torch
 import numpy as np
 import pandas as pd
@@ -84,6 +86,41 @@ meshes.Mesh.point_coords = property(fixed_point_coords)
 
 
 # ======================================================================
+# CLI Arguments
+# ======================================================================
+def _detect_latest_checkpoint(run_dir: str) -> str:
+    """Find the highest-numbered checkpoint in run_dir/model/."""
+    model_dir = os.path.join(run_dir, "model")
+    if not os.path.isdir(model_dir):
+        raise FileNotFoundError(f"No model directory found at {model_dir}")
+    pth_files = glob_module.glob(os.path.join(model_dir, "*.pth"))
+    if not pth_files:
+        raise FileNotFoundError(f"No .pth checkpoints found in {model_dir}")
+    epochs = []
+    for p in pth_files:
+        stem = os.path.splitext(os.path.basename(p))[0]
+        if stem.isdigit():
+            epochs.append(int(stem))
+    if not epochs:
+        raise ValueError(f"No numerically-named checkpoints in {model_dir}")
+    return str(max(epochs))
+
+
+parser = argparse.ArgumentParser(
+    description="Ablation study for vertebrae classification using NSM latent codes."
+)
+parser.add_argument(
+    "--run-dir", type=str, default="run_v57",
+    help="Training run directory to load model/latent codes from (default: run_v57)",
+)
+parser.add_argument(
+    "--checkpoint", type=str, default=None,
+    help="Checkpoint epoch to use, e.g. '2000'. If omitted, uses the latest available checkpoint.",
+)
+args = parser.parse_args()
+
+
+# ======================================================================
 # Ablation Configuration Definitions
 # ======================================================================
 
@@ -118,11 +155,25 @@ ABLATION_CONFIGS = OrderedDict([
 # ======================================================================
 # Configuration
 # ======================================================================
-TRAIN_DIR = "run_v56"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TRAIN_DIR = os.path.join(SCRIPT_DIR, args.run_dir)
+if not os.path.isdir(TRAIN_DIR):
+    raise FileNotFoundError(f"Run directory not found: {TRAIN_DIR}")
+
 os.chdir(TRAIN_DIR)
-CKPT = '2000'
+
+CKPT = args.checkpoint if args.checkpoint else _detect_latest_checkpoint(".")
 LC_PATH = f'latent_codes/{CKPT}.pth'
 MODEL_PATH = f'model/{CKPT}.pth'
+
+if not os.path.isfile(MODEL_PATH):
+    raise FileNotFoundError(f"Checkpoint {CKPT} not found at {MODEL_PATH}")
+if not os.path.isfile(LC_PATH):
+    raise FileNotFoundError(f"Latent codes not found at {LC_PATH}")
+
+RUN_NAME = os.path.basename(args.run_dir)
+print(f"Run directory: {RUN_NAME}")
+print(f"Checkpoint:    {CKPT}")
 
 config = load_config(config_path='model_params_config.json')
 
@@ -163,7 +214,7 @@ mesh_list = [os.path.join(mesh_dir, os.path.basename(p)) for p in mesh_list_raw]
 # ======================================================================
 # Create top-level ablation run directory
 # ======================================================================
-run_dir = create_run_directory(base_dir="results", prefix="ablation")
+run_dir = create_run_directory(base_dir="results", prefix=f"ablation_{RUN_NAME}_ckpt{CKPT}")
 print(f"\n{'='*60}")
 print(f"Ablation run directory: {run_dir}")
 print(f"{'='*60}\n")
@@ -906,6 +957,7 @@ summary_md_path = os.path.join(run_dir, "summary_statistics.md")
 with open(summary_md_path, "w", encoding="utf-8") as f:
     f.write("# Ablation Study: Summary Statistics\n\n")
     f.write(f"**Generated:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  \n")
+    f.write(f"**Run Directory:** {RUN_NAME}  \n")
     f.write(f"**Checkpoint:** {CKPT}  \n")
     f.write(f"**Test Meshes:** {len(mesh_list)}  \n")
     f.write(f"**Training Samples:** {len(X_train_valid)} ({len(X_train_raw) - len(X_train_valid)} skipped)  \n\n")
@@ -1164,10 +1216,10 @@ write_run_manifest(
     run_dir,
     description=(
         f"Ablation study comparing {len(ABLATION_CONFIGS)} classification configurations "
-        f"on {len(mesh_list)} validation meshes from checkpoint {CKPT}. "
+        f"on {len(mesh_list)} validation meshes from {RUN_NAME} checkpoint {CKPT}. "
         f"Isolates the contribution of NCA metric learning and supervised classifiers."
     ),
-    approach="Ablation: Baseline / +Metric Learning / +Classifiers / +Both",
+    approach=f"Ablation: Baseline / +Metric Learning / +Classifiers / +Both (model: {RUN_NAME})",
     script_path=os.path.abspath(__file__),
     train_data_paths=train_paths,
     test_data_paths=[os.path.basename(p) for p in mesh_list],
@@ -1176,6 +1228,7 @@ write_run_manifest(
     metric_learning_method="NCA (toggled per config)",
     checkpoint=CKPT,
     notes=(
+        f"Model Run: {RUN_NAME} (checkpoint {CKPT})\n\n"
         "Ablation Configurations:\n"
         "  A) Baseline — raw latent codes, distance-based retrieval only\n"
         "  B) + Metric Learning — NCA-transformed latents, distance-based retrieval\n"
