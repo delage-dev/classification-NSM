@@ -3,6 +3,7 @@
     "entity_name": "florida_museum",
     "entity": "UF",
     "run_name": "vertebrae_new",
+    "resume_epoch": 1700,
     "tags": [],
     "seed": 52122,
     "layer_dimensions": [
