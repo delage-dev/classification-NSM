@@ -74,7 +74,10 @@ from NSM.helper_funcs import (
     safe_load_mesh_scalars,
 )
 from NSM.optimization import pca_initialize_latent, get_top_k_pcs, find_similar, find_similar_cos
-from supervised_classifiers_v2 import train_classifiers, predict_classifiers
+from supervised_classifiers_v2 import (
+    train_classifiers, predict_classifiers,
+    train_position_regressors, predict_position_regressors,
+)
 from metric_learning import LatentMetricLearner
 from taxonomy_utils import parse_taxonomy_from_filename
 from evaluation_metrics import (
@@ -82,7 +85,9 @@ from evaluation_metrics import (
     metrics_to_dataframe,
     generate_hierarchical_confusion_matrices,
     generate_position_confusion_matrix,
+    calculate_regression_metrics,
 )
+from spine_position import SpinePositionMapper
 from run_utils import create_run_directory, write_run_manifest
 
 # Monkey-patch pymskt
@@ -161,6 +166,13 @@ ABLATION_CONFIGS = OrderedDict([
 # Configuration
 # ======================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SPINE_CSV_PATH = os.path.join(SCRIPT_DIR, "vertebrae_counts.csv")
+spine_mapper = SpinePositionMapper(SPINE_CSV_PATH) if os.path.isfile(SPINE_CSV_PATH) else None
+if spine_mapper:
+    print(f"SpinePositionMapper loaded: {len(spine_mapper.specimens)} specimens")
+else:
+    print("Warning: vertebrae_counts.csv not found, continuous position disabled")
+
 TRAIN_DIR = os.path.join(SCRIPT_DIR, args.run_dir)
 if not os.path.isdir(TRAIN_DIR):
     raise FileNotFoundError(f"Run directory not found: {TRAIN_DIR}")
@@ -289,6 +301,7 @@ X_train_raw = latent_codes.cpu().numpy()
 y_train_species = []
 y_train_genera = []
 y_train_positions = []
+y_train_continuous_position = []
 valid_indices = []
 
 for f_idx, f in enumerate(all_vtk_files):
@@ -297,12 +310,18 @@ for f_idx, f in enumerate(all_vtk_files):
         y_train_species.append(parsed['species'])
         y_train_genera.append(parsed['genus'])
         y_train_positions.append(parsed['position'])
+        cont_pos = spine_mapper.get_normalized_position(f) if spine_mapper else None
+        y_train_continuous_position.append(cont_pos if cont_pos is not None else float('nan'))
         valid_indices.append(f_idx)
     else:
         print(f"Skipping training file with invalid label format: {f}")
 
 X_train_valid = X_train_raw[valid_indices]
 y_train = np.column_stack((y_train_species, y_train_genera, y_train_positions))
+y_train_cont_pos = np.array(y_train_continuous_position, dtype=float)
+cont_pos_valid_mask = np.isfinite(y_train_cont_pos)
+n_cont_pos = int(cont_pos_valid_mask.sum())
+print(f"Continuous position labels available for {n_cont_pos}/{len(y_train_cont_pos)} training samples")
 
 
 # ======================================================================
@@ -352,6 +371,36 @@ else:
 
 
 # ======================================================================
+# Pre-train position regressors (continuous spine position)
+# ======================================================================
+pos_regressors_raw = None
+pos_regressors_raw_times = {}
+pos_regressors_ml = None
+pos_regressors_ml_times = {}
+
+if n_cont_pos >= 5:
+    print("\nTraining position regressors for continuous spine position...")
+    X_train_pos = X_train_valid[cont_pos_valid_mask]
+    y_train_pos = y_train_cont_pos[cont_pos_valid_mask]
+
+    print("  Training regressors on raw latent codes...")
+    pos_regressors_raw, pos_regressors_raw_times = train_position_regressors(X_train_pos, y_train_pos)
+    for name, t in pos_regressors_raw_times.items():
+        print(f"    {name}: {t:.3f}s")
+
+    if X_train_ml is not None:
+        X_train_pos_ml = X_train_ml[cont_pos_valid_mask[valid_indices.index(valid_indices[0]):]]
+        # Recompute: X_train_ml corresponds to X_train_valid rows
+        X_train_pos_ml = X_train_ml[cont_pos_valid_mask]
+        print("  Training regressors on NCA-transformed latent codes...")
+        pos_regressors_ml, pos_regressors_ml_times = train_position_regressors(X_train_pos_ml, y_train_pos)
+        for name, t in pos_regressors_ml_times.items():
+            print(f"    {name}: {t:.3f}s")
+else:
+    print(f"\nSkipping position regressors: only {n_cont_pos} continuous position labels available")
+
+
+# ======================================================================
 # Pre-compute training tensors on device for distance computation
 # ======================================================================
 print("\nPre-computing training tensors on device for distance computation...")
@@ -384,6 +433,8 @@ for mesh_idx, vert_fname in enumerate(mesh_list):
     gt_genus = parsed_truth.get('genus') if parsed_truth else None
     gt_family = parsed_truth.get('family') if parsed_truth else None
     gt_position = parsed_truth.get('position') if parsed_truth else None
+    gt_cont_pos = spine_mapper.get_normalized_position(mesh_basename) if spine_mapper else None
+    gt_derived_region = spine_mapper.get_derived_region(mesh_basename) if spine_mapper else None
 
     # --- Set up inference dataset ---
     actual_fname = vert_fname
@@ -434,6 +485,8 @@ for mesh_idx, vert_fname in enumerate(mesh_list):
             "ground_truth_genus": gt_genus,
             "ground_truth_family": gt_family,
             "ground_truth_position": gt_position,
+            "ground_truth_continuous_position": gt_cont_pos,
+            "ground_truth_derived_region": gt_derived_region,
         }
 
         # Choose pre-computed training tensor and novel vector for distance
@@ -520,6 +573,36 @@ for mesh_idx, vert_fname in enumerate(mesh_list):
             entry[f"euc_similar_{rank+1}_genus"] = euc_top5_genera[rank]
             entry[f"euc_similar_{rank+1}_position"] = euc_top5_positions[rank]
 
+        # --- Distance-based continuous position predictions ---
+        if spine_mapper:
+            for method, top5_indices, top5_distances in [
+                ("cos", cos_top5_indices, cos_top5_distances),
+                ("euc", euc_top5_indices, euc_top5_distances),
+            ]:
+                # Top-1 continuous position
+                top1_fname = all_vtk_files[top5_indices[0]]
+                top1_cont_pos = spine_mapper.get_normalized_position(top1_fname)
+                entry[f"{method}_top1_continuous_position"] = top1_cont_pos
+
+                # Inverse-distance-weighted average of top-5 continuous positions
+                top5_cont_positions = []
+                top5_weights = []
+                for rank in range(5):
+                    fname = all_vtk_files[top5_indices[rank]]
+                    cp = spine_mapper.get_normalized_position(fname)
+                    if cp is not None:
+                        top5_cont_positions.append(cp)
+                        dist = float(top5_distances[rank])
+                        top5_weights.append(1.0 / (dist + 1e-8))
+                if top5_cont_positions:
+                    weights = np.array(top5_weights)
+                    weights /= weights.sum()
+                    entry[f"{method}_top5_weighted_continuous_position"] = float(
+                        np.dot(weights, top5_cont_positions)
+                    )
+                else:
+                    entry[f"{method}_top5_weighted_continuous_position"] = None
+
         # --- Supervised classifier predictions (configs C and D only) ---
         if cfg["use_classifiers"]:
             if cfg["use_metric_learning"] and classifiers_ml is not None:
@@ -545,6 +628,24 @@ for mesh_idx, vert_fname in enumerate(mesh_list):
                     entry[f"{clf_name}_species_confidence"] = f"{max(probabilities[clf_name][0][0]):.2%}"
                     entry[f"{clf_name}_genus_confidence"] = f"{max(probabilities[clf_name][1][0]):.2%}"
                     entry[f"{clf_name}_position_confidence"] = f"{max(probabilities[clf_name][2][0]):.2%}"
+
+        # --- Position regressor predictions ---
+        if pos_regressors_raw is not None or pos_regressors_ml is not None:
+            if cfg["use_metric_learning"] and pos_regressors_ml is not None:
+                pos_reg_models = pos_regressors_ml
+                pos_test_vec = novel_vec_ml
+            elif pos_regressors_raw is not None:
+                pos_reg_models = pos_regressors_raw
+                pos_test_vec = novel_vec_raw
+            else:
+                pos_reg_models = None
+                pos_test_vec = None
+
+            if pos_reg_models is not None and pos_test_vec is not None:
+                pos_preds, pos_inf_times = predict_position_regressors(pos_reg_models, pos_test_vec)
+                for reg_name, pred_val in pos_preds.items():
+                    entry[f"{reg_name}_continuous_position"] = float(pred_val[0])
+                    entry[f"{reg_name}_inf_time"] = pos_inf_times[reg_name]
 
         config_logs[cfg_name].append(entry)
 
@@ -616,6 +717,56 @@ for cfg_name, cfg in ABLATION_CONFIGS.items():
         method_prefix = row['method'].split()[0].lower()
         key = f"{method_prefix}_{row['metric']}"
         config_summary[key] = row['value']
+
+    # --- Continuous position regression metrics ---
+    regression_rows = []
+    gt_col = "ground_truth_continuous_position"
+    if gt_col in df.columns and df[gt_col].notna().any():
+        gt_vals = df[gt_col].values.astype(float)
+
+        # Distance-based continuous position predictions
+        for method in ["cos", "euc"]:
+            method_label = "Cosine" if method == "cos" else "Euclidean"
+            for pred_col_suffix, pred_label in [
+                ("top1_continuous_position", "Top-1"),
+                ("top5_weighted_continuous_position", "Top-5 Weighted"),
+            ]:
+                pred_col = f"{method}_{pred_col_suffix}"
+                if pred_col in df.columns and df[pred_col].notna().any():
+                    pred_vals = df[pred_col].values.astype(float)
+                    reg_m = calculate_regression_metrics(gt_vals, pred_vals)
+                    if reg_m:
+                        reg_m["method"] = f"{method_label} {pred_label}"
+                        regression_rows.append(reg_m)
+                        config_summary[f"{method}_{pred_col_suffix}_mae"] = reg_m["mae"]
+                        config_summary[f"{method}_{pred_col_suffix}_r2"] = reg_m["r2"]
+                        print(f"  {method_label} {pred_label} Position: MAE={reg_m['mae']:.4f}, R²={reg_m['r2']:.4f}, ρ={reg_m['spearman_rho']:.4f}")
+
+        # Regressor predictions
+        regressor_names = list(pos_regressors_raw.keys()) if pos_regressors_raw else []
+        for reg_name in regressor_names:
+            pred_col = f"{reg_name}_continuous_position"
+            if pred_col in df.columns and df[pred_col].notna().any():
+                pred_vals = df[pred_col].values.astype(float)
+                reg_m = calculate_regression_metrics(gt_vals, pred_vals)
+                if reg_m:
+                    reg_m["method"] = reg_name
+                    regression_rows.append(reg_m)
+                    config_summary[f"{reg_name}_mae"] = reg_m["mae"]
+                    config_summary[f"{reg_name}_r2"] = reg_m["r2"]
+                    print(f"  {reg_name}: MAE={reg_m['mae']:.4f}, R²={reg_m['r2']:.4f}, ρ={reg_m['spearman_rho']:.4f}")
+
+    if regression_rows:
+        reg_df = pd.DataFrame(regression_rows)
+        reg_df.to_csv(os.path.join(cfg_dir, "position_regression_metrics.csv"), index=False)
+
+    # --- Derived region accuracy comparison ---
+    if "ground_truth_derived_region" in df.columns and "ground_truth_position" in df.columns:
+        mask = df["ground_truth_derived_region"].notna() & df["ground_truth_position"].notna()
+        if mask.sum() > 0:
+            derived_acc = (df.loc[mask, "ground_truth_derived_region"] == df.loc[mask, "ground_truth_position"]).mean()
+            config_summary["derived_region_accuracy"] = derived_acc
+            print(f"  Derived region matches ground truth position: {derived_acc:.4f}")
 
     # --- Supervised classifier metrics (configs C and D only) ---
     all_metrics_rows = []
@@ -761,11 +912,91 @@ for cfg_name, cfg in ABLATION_CONFIGS.items():
                     plt.savefig(os.path.join(cm_dir, "confusion_matrix_position.png"), dpi=300)
                     plt.close()
 
+    # --- Continuous position plots ---
+    if regression_rows and gt_col in df.columns and df[gt_col].notna().any():
+        pos_plots_dir = os.path.join(cfg_dir, "position_plots")
+        os.makedirs(pos_plots_dir, exist_ok=True)
+        gt_vals = df[gt_col].values.astype(float)
+
+        # Collect all prediction methods for plotting
+        pred_methods = {}
+        for method in ["cos", "euc"]:
+            for suffix in ["top1_continuous_position", "top5_weighted_continuous_position"]:
+                col = f"{method}_{suffix}"
+                if col in df.columns and df[col].notna().any():
+                    label = f"{'Cosine' if method == 'cos' else 'Euclidean'} {'Top-1' if 'top1' in suffix else 'Top-5 Wt'}"
+                    pred_methods[label] = df[col].values.astype(float)
+        regressor_names = list(pos_regressors_raw.keys()) if pos_regressors_raw else []
+        for reg_name in regressor_names:
+            col = f"{reg_name}_continuous_position"
+            if col in df.columns and df[col].notna().any():
+                pred_methods[reg_name] = df[col].values.astype(float)
+
+        # Scatter plot: true vs predicted for each method
+        n_methods = len(pred_methods)
+        if n_methods > 0:
+            cols = min(3, n_methods)
+            rows_needed = (n_methods + cols - 1) // cols
+            fig, axes = plt.subplots(rows_needed, cols, figsize=(6 * cols, 5 * rows_needed), squeeze=False)
+            for ax_idx, (label, pred_vals) in enumerate(pred_methods.items()):
+                ax = axes[ax_idx // cols][ax_idx % cols]
+                mask = np.isfinite(gt_vals) & np.isfinite(pred_vals)
+                ax.scatter(gt_vals[mask], pred_vals[mask], alpha=0.6, s=30)
+                ax.plot([0, 1], [0, 1], 'r--', lw=1, label="Perfect")
+                ax.set_xlabel("True Position")
+                ax.set_ylabel("Predicted Position")
+                ax.set_title(label)
+                ax.set_xlim(-0.05, 1.05)
+                ax.set_ylim(-0.05, 1.05)
+                ax.set_aspect('equal')
+                ax.legend(fontsize=8)
+            # Hide unused axes
+            for ax_idx in range(n_methods, rows_needed * cols):
+                axes[ax_idx // cols][ax_idx % cols].set_visible(False)
+            fig.suptitle(f"Continuous Position: True vs Predicted [{cfg['label']}]")
+            fig.tight_layout()
+            fig.savefig(os.path.join(pos_plots_dir, "scatter_true_vs_pred.png"), dpi=300)
+            plt.close(fig)
+
+            # Residual histogram (best method by MAE)
+            best_method = min(regression_rows, key=lambda r: r["mae"])["method"]
+            if best_method in pred_methods:
+                best_pred = pred_methods[best_method]
+                mask = np.isfinite(gt_vals) & np.isfinite(best_pred)
+                residuals = best_pred[mask] - gt_vals[mask]
+                fig, ax = plt.subplots(figsize=(8, 5))
+                ax.hist(residuals, bins=30, edgecolor='black', alpha=0.7)
+                ax.axvline(0, color='red', linestyle='--', lw=1)
+                ax.set_xlabel("Residual (Predicted - True)")
+                ax.set_ylabel("Count")
+                ax.set_title(f"Position Residuals — {best_method} [{cfg['label']}]")
+                fig.tight_layout()
+                fig.savefig(os.path.join(pos_plots_dir, "residual_histogram.png"), dpi=300)
+                plt.close(fig)
+
+            # Error-by-region box plot (best method)
+            if best_method in pred_methods and "ground_truth_position" in df.columns:
+                best_pred = pred_methods[best_method]
+                mask = np.isfinite(gt_vals) & np.isfinite(best_pred) & df["ground_truth_position"].notna()
+                abs_errors = np.abs(best_pred[mask] - gt_vals[mask])
+                regions = df.loc[mask, "ground_truth_position"].values
+                err_df = pd.DataFrame({"Absolute Error": abs_errors, "Region": regions})
+                fig, ax = plt.subplots(figsize=(8, 5))
+                sns.boxplot(data=err_df, x="Region", y="Absolute Error", ax=ax,
+                            order=["Cervical", "Thoracic", "Lumbar"])
+                ax.set_title(f"Position Error by Region — {best_method} [{cfg['label']}]")
+                fig.tight_layout()
+                fig.savefig(os.path.join(pos_plots_dir, "error_by_region.png"), dpi=300)
+                plt.close(fig)
+
     # --- Per-config README ---
     cfg_files = {
         "predictions.csv": "Per-mesh predictions with full top-5 taxonomy breakdown and ground truth",
         "distance_metrics.csv": "Top-1/Top-5 accuracy for distance-based retrieval (species, genus, family, position)",
     }
+    if regression_rows:
+        cfg_files["position_regression_metrics.csv"] = "MAE, RMSE, R², Spearman for continuous position prediction"
+        cfg_files["position_plots/"] = "Scatter, residual, and error-by-region plots for continuous position"
     if cfg["use_classifiers"]:
         cfg_files["detailed_metrics.csv"] = "Full per-classifier, per-class metrics"
     cfg_files["confusion_matrices/"] = "Confusion matrices at family/genus/species/position levels"
@@ -1197,6 +1428,59 @@ with open(summary_md_path, "w", encoding="utf-8") as f:
         f.write("\n")
 
     # ================================================================
+    # CONTINUOUS POSITION PREDICTION
+    # ================================================================
+    f.write("---\n\n# Continuous Spine Position Prediction\n\n")
+    f.write("Continuous position is a 0-1 normalized value: `(ordinal - 0.5) / total`.\n")
+    f.write("First vertebra ≈ 0.02, last ≈ 0.98.\n\n")
+
+    # Distance-based continuous position
+    f.write("## Distance-Based Continuous Position\n\n")
+    f.write("| Configuration | Method | MAE | R² |\n")
+    f.write("|---------------|--------|-----|----|\n")
+    for _, row in comparison_df.iterrows():
+        for method in ["cos", "euc"]:
+            method_label = "Cosine" if method == "cos" else "Euclidean"
+            for suffix, pred_label in [
+                ("top1_continuous_position", "Top-1"),
+                ("top5_weighted_continuous_position", "Top-5 Weighted"),
+            ]:
+                mae_key = f"{method}_{suffix}_mae"
+                r2_key = f"{method}_{suffix}_r2"
+                mae_val = row.get(mae_key)
+                r2_val = row.get(r2_key)
+                if isinstance(mae_val, float):
+                    f.write(f"| {row['label']} | {method_label} {pred_label} | {mae_val:.4f} | {_fmt(r2_val)} |\n")
+    f.write("\n")
+
+    # Regressor continuous position
+    regressor_names_for_summary = list(pos_regressors_raw.keys()) if pos_regressors_raw else []
+    if regressor_names_for_summary:
+        f.write("## Supervised Regressors — Continuous Position\n\n")
+        f.write("| Configuration | Regressor | MAE | R² |\n")
+        f.write("|---------------|-----------|-----|----|\n")
+        for _, row in comparison_df.iterrows():
+            for reg_name in regressor_names_for_summary:
+                mae_key = f"{reg_name}_mae"
+                r2_key = f"{reg_name}_r2"
+                mae_val = row.get(mae_key)
+                r2_val = row.get(r2_key)
+                if isinstance(mae_val, float):
+                    f.write(f"| {row['label']} | {reg_name} | {mae_val:.4f} | {_fmt(r2_val)} |\n")
+        f.write("\n")
+
+    # Derived region accuracy
+    f.write("## Derived Region Accuracy\n\n")
+    f.write("Accuracy of deriving categorical region (C/T/L) from continuous position ")
+    f.write("using specimen-specific boundary counts from vertebrae_counts.csv.\n\n")
+    f.write("| Configuration | Derived Region Accuracy |\n")
+    f.write("|---------------|------------------------|\n")
+    for _, row in comparison_df.iterrows():
+        val = row.get("derived_region_accuracy")
+        f.write(f"| {row['label']} | {_fmt(val)} |\n")
+    f.write("\n")
+
+    # ================================================================
     # IMPACT ANALYSIS
     # ================================================================
     f.write("---\n\n# Impact Analysis\n\n")
@@ -1302,6 +1586,12 @@ with open(summary_md_path, "w", encoding="utf-8") as f:
     if classifiers_ml_times:
         for name, t in classifiers_ml_times.items():
             f.write(f"| {name} (NCA-transformed) | {t:.4f} |\n")
+    if pos_regressors_raw_times:
+        for name, t in pos_regressors_raw_times.items():
+            f.write(f"| {name} (raw latents) | {t:.4f} |\n")
+    if pos_regressors_ml_times:
+        for name, t in pos_regressors_ml_times.items():
+            f.write(f"| {name} (NCA-transformed) | {t:.4f} |\n")
     f.write("\n")
 
 print(f"Summary statistics written to: {summary_md_path}")
@@ -1314,6 +1604,8 @@ all_training_times = {
     "metric_learning_NCA": ml_time,
     "classifiers_raw": classifiers_raw_times,
     "classifiers_ml": classifiers_ml_times,
+    "position_regressors_raw": pos_regressors_raw_times,
+    "position_regressors_ml": pos_regressors_ml_times,
 }
 with open(os.path.join(run_dir, "training_times.json"), "w", encoding="utf-8") as f:
     json.dump(all_training_times, f, indent=2)
@@ -1377,7 +1669,11 @@ write_run_manifest(
         "- Recall (macro, weighted, per-class)\n"
         "- F1 (macro, weighted, per-class)\n"
         "- Top-1 / Top-5 Accuracy (distance methods) at species/genus/family/position levels\n"
+        "- Continuous spine position: MAE, RMSE, R², Spearman correlation\n"
+        "- Position regressors (KNN, SVR, RF, MLP) on continuous 0-1 position\n"
+        "- Derived region accuracy: categorical region from continuous position\n"
         "- Confusion Matrices (species, genus, family, spinal position)\n"
+        "- Scatter/residual/error-by-region plots for continuous position\n"
         "- Training and inference times\n\n"
         "Cross-configuration outputs:\n"
         "- Side-by-side comparison CSV and markdown tables\n"

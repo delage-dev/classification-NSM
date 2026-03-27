@@ -21,15 +21,17 @@ def parse_taxonomy_from_filename(filename: str) -> Optional[Dict[str, str]]:
     
     # Extract vertebra type from end (e.g., -c1, -t12, -l3)
     match_end = re.search(r'-([ctlCTL])(\d+)$', base)
+    file_ordinal = None
     if match_end:
         pos_char = match_end.group(1).lower()
         vertebra_number = int(match_end.group(2))
         position = {'c': 'Cervical', 't': 'Thoracic', 'l': 'Lumbar'}.get(pos_char)
         base = base[:match_end.start()] # remove the matched end
-        
+
         # Now parse the rest, which might have file_num appended (e.g., _26 or -26)
-        match_filenum = re.search(r'[-_]\d+$', base)
+        match_filenum = re.search(r'[-_](\d+)$', base)
         if match_filenum:
+            file_ordinal = int(match_filenum.group(1))
             base = base[:match_filenum.start()]
             
         # Split by underscore or hyphen to get taxonomic parts
@@ -56,7 +58,8 @@ def parse_taxonomy_from_filename(filename: str) -> Optional[Dict[str, str]]:
             'species': species.lower() if species else "unknown",
             'specimen_id': specimen_id.lower() if specimen_id else "unknown",
             'position': position,
-            'vertebra_number': vertebra_number
+            'vertebra_number': vertebra_number,
+            'file_ordinal': file_ordinal,
         }
         
     return None
