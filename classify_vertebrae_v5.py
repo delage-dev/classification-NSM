@@ -88,6 +88,7 @@ from evaluation_metrics import (
     calculate_regression_metrics,
 )
 from spine_position import SpinePositionMapper
+from logistic_interpretation import run_lr_interpretation
 from run_utils import create_run_directory, write_run_manifest
 
 # Monkey-patch pymskt
@@ -912,6 +913,39 @@ for cfg_name, cfg in ABLATION_CONFIGS.items():
                     plt.savefig(os.path.join(cm_dir, "confusion_matrix_position.png"), dpi=300)
                     plt.close()
 
+    # --- Logistic Regression interpretation ---
+    if cfg["use_classifiers"]:
+        lr_interp_dir = os.path.join(cfg_dir, "lr_interpretation")
+        if cfg["use_metric_learning"] and classifiers_ml is not None:
+            lr_model = classifiers_ml.get("LogisticRegression")
+            lr_X = X_train_ml
+        else:
+            lr_model = classifiers_raw.get("LogisticRegression") if classifiers_raw else None
+            lr_X = X_train_valid
+
+        if lr_model is not None:
+            print(f"  Running LR interpretation for position...")
+            try:
+                lr_results_pos = run_lr_interpretation(
+                    lr_model, lr_X, y_train,
+                    target_index=2, target_name="position",
+                    output_dir=lr_interp_dir, top_n=20,
+                )
+                n_sig = sum(lr_results_pos["sig_counts"].values())
+                print(f"    Position: {n_sig} significant latent dims (p<0.05) across all classes")
+            except Exception as e:
+                print(f"    Warning: LR position interpretation failed: {e}")
+
+            print(f"  Running LR interpretation for species...")
+            try:
+                lr_results_sp = run_lr_interpretation(
+                    lr_model, lr_X, y_train,
+                    target_index=0, target_name="species",
+                    output_dir=lr_interp_dir, top_n=20,
+                )
+            except Exception as e:
+                print(f"    Warning: LR species interpretation failed: {e}")
+
     # --- Continuous position plots ---
     if regression_rows and gt_col in df.columns and df[gt_col].notna().any():
         pos_plots_dir = os.path.join(cfg_dir, "position_plots")
@@ -999,6 +1033,7 @@ for cfg_name, cfg in ABLATION_CONFIGS.items():
         cfg_files["position_plots/"] = "Scatter, residual, and error-by-region plots for continuous position"
     if cfg["use_classifiers"]:
         cfg_files["detailed_metrics.csv"] = "Full per-classifier, per-class metrics"
+        cfg_files["lr_interpretation/"] = "Logistic Regression coefficient analysis, Wald-test p-values, and feature importance plots"
     cfg_files["confusion_matrices/"] = "Confusion matrices at family/genus/species/position levels"
 
     write_run_manifest(
