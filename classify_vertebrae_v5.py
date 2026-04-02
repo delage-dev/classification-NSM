@@ -773,15 +773,15 @@ for cfg_name, cfg in ABLATION_CONFIGS.items():
     all_metrics_rows = []
     if cfg["use_classifiers"]:
         for clf_name in CLASSIFIER_NAMES:
-            for target, gt_col, pred_col in [
+            for target, clf_gt_col, pred_col in [
                 ("species", "ground_truth_species", f"{clf_name}_predicted_species"),
                 ("genus", "ground_truth_genus", f"{clf_name}_predicted_genus"),
                 ("position", "ground_truth_position", f"{clf_name}_predicted_position"),
             ]:
-                if pred_col not in df.columns or gt_col not in df.columns:
+                if pred_col not in df.columns or clf_gt_col not in df.columns:
                     continue
-                mask = df[gt_col].notna() & df[pred_col].notna()
-                y_true = df.loc[mask, gt_col].tolist()
+                mask = df[clf_gt_col].notna() & df[pred_col].notna()
+                y_true = df.loc[mask, clf_gt_col].tolist()
                 y_pred = df.loc[mask, pred_col].tolist()
                 if not y_true:
                     continue
@@ -837,10 +837,10 @@ for cfg_name, cfg in ABLATION_CONFIGS.items():
         if cfg["use_classifiers"]:
             for clf_name in CLASSIFIER_NAMES:
                 col = f"{clf_name}_predicted_species"
-                gt_col = "ground_truth_species"
-                if col in df.columns and gt_col in df.columns:
-                    mask = df[gt_col].notna() & df[col].notna()
-                    acc = (df.loc[mask, gt_col] == df.loc[mask, col]).mean()
+                cm_gt_col = "ground_truth_species"
+                if col in df.columns and cm_gt_col in df.columns:
+                    mask = df[cm_gt_col].notna() & df[col].notna()
+                    acc = (df.loc[mask, cm_gt_col] == df.loc[mask, col]).mean()
                     if acc > best_acc:
                         best_acc = acc
                         best_approach = ("classifier", clf_name)
